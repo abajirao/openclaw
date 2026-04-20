@@ -18,7 +18,7 @@ import {
 } from "../../execution-contract.js";
 import { hasOnlyAssistantReasoningContent } from "../../replay-turn-classification.js";
 import type { AgentMessage } from "../../runtime/index.js";
-import { hasNonzeroUsage } from "../../usage.js";
+import { hasNonzeroUsage, normalizeUsage, type UsageLike } from "../../usage.js";
 import {
   hasCommittedMessagingToolDeliveryEvidence,
   hasMessagingToolDeliveryEvidence,
@@ -538,7 +538,14 @@ export function isLikelyConfigErrorEmptyStream(params: {
   if (Array.isArray(assistant.content) && assistant.content.length > 0) {
     return false;
   }
-  if (hasNonzeroUsage(assistant.usage)) {
+  // Assistant usage carries aggregate counts on `totalTokens` (plus provider
+  // alias fields like `input_tokens`, `prompt_tokens`, `totalTokens`), while
+  // `hasNonzeroUsage` only inspects the normalized `{input, output, cacheRead,
+  // cacheWrite, total}` surface. Run the usage through `normalizeUsage` first
+  // so a real model turn that reports billing only via `totalTokens` (for
+  // example the OpenAI WS conversion path) cannot be misclassified as a
+  // zero-token config error.
+  if (hasNonzeroUsage(normalizeUsage(assistant.usage as UsageLike | undefined))) {
     return false;
   }
   return true;
