@@ -8,6 +8,7 @@ import {
   failTaskRunByRunId,
   startTaskRunByRunId,
 } from "../../tasks/detached-task-runtime.js";
+import { listTasksForRelatedSessionKey } from "../../tasks/runtime-internal.js";
 import { resolveRequiredCompletionTerminalResult } from "../../tasks/task-completion-contract.js";
 import { deliveryContextFromSession, type DeliveryContext } from "../../utils/delivery-context.js";
 import { AcpRuntimeError } from "../runtime/errors.js";
@@ -127,6 +128,15 @@ export function resolveBackgroundTaskContext(params: {
   };
 }
 
+// A silent requester task — the cron runtime path sets this — must not have its
+// silence broken by the ACP children it spawns, otherwise every cron-driven
+// harness run floods the channel with "Background task done". Interactive
+// parents keep the default policy so child completions stay visible.
+function resolveInheritedNotifyPolicy(requesterSessionKey: string): "silent" | undefined {
+  const parent = listTasksForRelatedSessionKey(requesterSessionKey)[0];
+  return parent?.notifyPolicy === "silent" ? "silent" : undefined;
+}
+
 export function createBackgroundTaskRecord(
   context: BackgroundTaskContext,
   startedAt: number,
@@ -143,6 +153,7 @@ export function createBackgroundTaskRecord(
       label: context.label,
       task: context.task,
       startedAt,
+      notifyPolicy: resolveInheritedNotifyPolicy(context.requesterSessionKey),
     });
     if (!task) {
       logVerbose(

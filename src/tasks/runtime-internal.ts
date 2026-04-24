@@ -34,6 +34,7 @@ export {
   listTaskRecordsUnsorted,
   listTasksForFlowId,
   listTasksForOwnerKey,
+  listTasksForRelatedSessionKey,
   linkTaskToFlowById,
   markTaskLostById,
   markTaskRunningByRunId,
