@@ -60,12 +60,17 @@ import {
   replaceRuntimeAuthProfileStoreSnapshots,
 } from "../../agents/auth-profiles.js";
 import type { ModelAliasIndex } from "../../agents/model-selection.js";
+import type { ChannelPlugin } from "../../channels/plugins/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import type { ProviderPlugin } from "../../plugins/types.js";
+import {
+  createChannelTestPluginBase,
+  createTestRegistry,
+} from "../../test-utils/channel-plugins.js";
 import type { ElevatedLevel } from "../thinking.js";
 import { handleDirectiveOnly } from "./directive-handling.impl.js";
 import {
@@ -327,6 +332,20 @@ async function resolveModelInfoReply(
   });
 }
 
+function registerTelegramStubChannelPlugin() {
+  const plugin: ChannelPlugin = {
+    ...createChannelTestPluginBase({ id: "telegram", label: "Telegram" }),
+    commands: {
+      buildModelBrowseChannelData: () => ({
+        telegram: {
+          buttons: [[{ text: "Browse providers", callback_data: "models:" }]],
+        },
+      }),
+    },
+  };
+  setActivePluginRegistry(createTestRegistry([{ pluginId: "telegram", plugin, source: "test" }]));
+}
+
 describe("/model chat UX", () => {
   it("shows summary for /model with no args", async () => {
     const reply = await resolveModelInfoReply();
@@ -334,6 +353,18 @@ describe("/model chat UX", () => {
     expect(reply?.text).toContain("Current:");
     expect(reply?.text).toContain("Browse: /models");
     expect(reply?.text).toContain("Switch: /model <provider/model>");
+  });
+
+  it("returns telegram browse buttons for /model with no args on telegram surface", async () => {
+    registerTelegramStubChannelPlugin();
+    const reply = await resolveModelInfoReply({ surface: "telegram" });
+
+    expect(reply?.text).toContain("Current:");
+    expect(reply?.text).toContain("Tap below to browse models");
+    const buttons = (reply?.channelData as { telegram?: { buttons?: unknown[][] } })?.telegram
+      ?.buttons;
+    expect(buttons).toBeDefined();
+    expect(buttons?.length).toBeGreaterThan(0);
   });
 
   it("shows active runtime model when different from selected model", async () => {

@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
+  findCommandByNativeName,
   isCommandEnabled,
   maybeResolveTextAlias,
   shouldHandleTextCommands,
@@ -47,6 +48,21 @@ export function shouldBypassAcpDispatchForCommand(
 
   if (isResetCommandCandidate(normalized)) {
     return true;
+  }
+
+  // Bypass ACP for any registered native chat command (e.g., /model, /models,
+  // /help, /status, /think) so they reach OpenClaw's native handlers and emit
+  // the right interactive replies (model picker, help text, etc.) instead of
+  // being forwarded to an ACP harness as plain text. /acp itself is excluded
+  // because it manages the ACP runtime and must stay there.
+  if (normalized.startsWith("/")) {
+    const slashName = normalized.slice(1).split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+    if (slashName && slashName !== "acp") {
+      const provider = ctx.Surface ?? ctx.Provider ?? "";
+      if (findCommandByNativeName(slashName, provider)) {
+        return allowTextCommands;
+      }
+    }
   }
 
   if (!normalized.startsWith("!")) {
