@@ -57,7 +57,10 @@ import {
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
 import { createRunningTaskRun } from "../tasks/detached-task-runtime.js";
-import { listTasksForOwnerKey } from "../tasks/runtime-internal.js";
+import {
+  findLatestTaskForRelatedSessionKey,
+  listTasksForOwnerKey,
+} from "../tasks/runtime-internal.js";
 import {
   deliveryContextFromSession,
   formatConversationTarget,
@@ -480,6 +483,24 @@ function resolveRequesterInternalSessionKey(params: {
         mainKey,
       })
     : alias;
+}
+
+// If the requester (parent) session is owned by a task whose notifyPolicy is
+// "silent" — the cron runtime path sets this — propagate the silence to the
+// spawned ACP child so cron-driven harness work doesn't flood Telegram with
+// "Background task done" messages. Interactive parents (default "done_only")
+// still get child completion deliveries.
+function resolveInheritedAcpNotifyPolicy(requesterInternalKey: string): "silent" | undefined {
+  const trimmed = requesterInternalKey.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    const parent = findLatestTaskForRelatedSessionKey(trimmed);
+    return parent?.notifyPolicy === "silent" ? "silent" : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function persistAcpSpawnSessionFileBestEffort(params: {
@@ -1312,6 +1333,7 @@ export async function spawnAcpDirect(
     }
     parentRelay?.notifyStarted();
     try {
+      const inheritedNotifyPolicy = resolveInheritedAcpNotifyPolicy(requesterInternalKey);
       createRunningTaskRun({
         runtime: "acp",
         sourceId: childRunId,
@@ -1325,6 +1347,7 @@ export async function spawnAcpDirect(
         preferMetadata: true,
         deliveryStatus: requesterInternalKey ? "pending" : "parent_missing",
         startedAt: Date.now(),
+        ...(inheritedNotifyPolicy ? { notifyPolicy: inheritedNotifyPolicy } : {}),
       });
     } catch (error) {
       log.warn("Failed to create background task for ACP spawn", {
@@ -1344,6 +1367,7 @@ export async function spawnAcpDirect(
   }
 
   try {
+    const inheritedNotifyPolicy = resolveInheritedAcpNotifyPolicy(requesterInternalKey);
     createRunningTaskRun({
       runtime: "acp",
       sourceId: childRunId,
@@ -1357,6 +1381,7 @@ export async function spawnAcpDirect(
       preferMetadata: true,
       deliveryStatus: requesterInternalKey ? "pending" : "parent_missing",
       startedAt: Date.now(),
+      ...(inheritedNotifyPolicy ? { notifyPolicy: inheritedNotifyPolicy } : {}),
     });
   } catch (error) {
     log.warn("Failed to create background task for ACP spawn", {
