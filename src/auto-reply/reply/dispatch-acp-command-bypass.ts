@@ -1,6 +1,7 @@
 // Detects ACP commands that should bypass normal agent dispatch.
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { hasControlCommand } from "../command-detection.js";
+import { findCommandByNativeName } from "../commands-registry.js";
 import { isCommandEnabled } from "../commands-registry-list.js";
 import { maybeResolveTextAlias } from "../commands-registry-normalize.js";
 import { shouldHandleTextCommands } from "../commands-text-routing.js";
@@ -47,6 +48,20 @@ export function shouldBypassAcpDispatchForCommand(
 
   if (isLocalCommandCandidate(normalized, cfg)) {
     return allowTextCommands;
+  }
+
+  // Bypass ACP for any registered native chat command (e.g., /model, /models,
+  // /help, /think) so they reach OpenClaw's native handlers and emit the right
+  // interactive replies (model picker, help text, etc.) instead of being
+  // forwarded to an ACP harness as plain text. /acp is handled above.
+  if (normalized.startsWith("/")) {
+    const slashName = normalized.slice(1).split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+    if (slashName && slashName !== "acp") {
+      const provider = ctx.Surface ?? ctx.Provider ?? "";
+      if (findCommandByNativeName(slashName, provider)) {
+        return allowTextCommands;
+      }
+    }
   }
 
   if (!normalized.startsWith("!")) {
