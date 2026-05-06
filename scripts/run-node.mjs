@@ -1298,6 +1298,34 @@ const syncRuntimeArtifactsAndStamp = async (deps) => {
   return synced;
 };
 
+// `pnpm build` (tsdown clean) wipes dist/, including dist/control-ui/, but the
+// UI is built by a separate Vite step (`pnpm ui:build`). When run-node.mjs
+// later detects dist is stale and rebuilds with `tsdown --no-clean`, the UI
+// directory stays missing — leading to "Control UI assets not found" the next
+// time the dashboard is opened. Restore it on demand.
+const ensureControlUiBuilt = async (deps) => {
+  const indexPath = path.join(deps.distRoot, "control-ui", "index.html");
+  if (statMtime(indexPath, deps.fs) != null) {
+    return true;
+  }
+  logRunner("Control UI assets missing; running pnpm ui:build to restore.", deps);
+  const child = deps.spawn("pnpm", ["ui:build"], {
+    cwd: deps.cwd,
+    env: deps.env,
+    stdio: deps.outputTee ? ["inherit", "pipe", "pipe"] : "inherit",
+  });
+  pipeSpawnedOutput(child, deps);
+  const res = await waitForSpawnedProcess(child, deps);
+  if (getInterruptedSpawnExitCode(res) !== null) {
+    return false;
+  }
+  if (res.exitCode !== 0 && res.exitCode !== null) {
+    logRunner(`Control UI build failed (exit ${res.exitCode}).`, deps);
+    return false;
+  }
+  return statMtime(indexPath, deps.fs) != null;
+};
+
 const writeBuildStamp = (deps) => {
   try {
     writeDistBuildStamp({
@@ -1494,6 +1522,9 @@ export async function runNodeMain(params = {}) {
           return await closeRunNodeOutputTee(deps, 1);
         }
       }
+      if (!(await ensureControlUiBuilt(deps))) {
+        return await closeRunNodeOutputTee(deps, 1);
+      }
       exitCode = await runOpenClaw(deps);
       return await closeRunNodeOutputTee(deps, exitCode);
     }
@@ -1571,6 +1602,9 @@ export async function runNodeMain(params = {}) {
       }
       writeBuildStamp(deps);
       writeRuntimePostBuildStamp(deps);
+      if (!(await ensureControlUiBuilt(deps))) {
+        return 1;
+      }
       return 0;
     });
     if (buildExitCode !== 0) {
