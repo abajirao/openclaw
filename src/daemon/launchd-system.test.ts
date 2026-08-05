@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   accessErrors: new Map<string, string>(),
   readdirError: "",
   plutilLabels: new Map<string, string>(),
+  plutilErrors: new Map<string, string>(),
 }));
 
 function fsError(code: string, target: string): NodeJS.ErrnoException {
@@ -58,9 +59,17 @@ const execFileUtf8 = vi.hoisted(() =>
   vi.fn(async (_command: string, args: string[]) => {
     const target = args.at(-1) ?? "";
     const label = state.plutilLabels.get(target);
-    return label
-      ? { stdout: `${label}\n`, stderr: "", code: 0 }
-      : { stdout: "", stderr: "missing Label", code: 1 };
+    if (label !== undefined) {
+      return { stdout: `${label}\n`, stderr: "", code: 0 };
+    }
+    // Matches the real plutil failure for a readable plist with no Label key.
+    return {
+      stdout: "",
+      stderr:
+        state.plutilErrors.get(target) ??
+        `${target}: Could not extract value, error: No value at that key path or invalid key path: Label`,
+      code: 1,
+    };
   }),
 );
 
@@ -82,6 +91,7 @@ describe("system LaunchDaemon ownership", () => {
     state.accessErrors.clear();
     state.readdirError = "";
     state.plutilLabels.clear();
+    state.plutilErrors.clear();
     if (originalPlatformDescriptor) {
       Object.defineProperty(process, "platform", {
         ...originalPlatformDescriptor,
@@ -176,6 +186,57 @@ describe("system LaunchDaemon ownership", () => {
     ]);
   });
 
+  it("ignores a readable vendor plist that carries no Label key", async () => {
+    // Regression: an inert third-party stub (an empty plist) used to make the
+    // whole scan unverifiable and blocked every gateway service mutation.
+    const unlabeled = "/Library/LaunchDaemons/com.google.keystone.daemon.plist";
+    state.files.set(unlabeled, "<plist><dict/></plist>");
+
+    await expect(inspectSystemLaunchDaemonOwnership("ai.openclaw.gateway")).resolves.toEqual({
+      status: "absent",
+      serviceTarget: "system/ai.openclaw.gateway",
+    });
+  });
+
+  it("keeps scanning past an unlabeled plist to find a real same-label owner", async () => {
+    // "a.vendor" sorts ahead of "ai.openclaw", so the unlabeled entry is read first.
+    const unlabeled = "/Library/LaunchDaemons/a.vendor.unlabeled.plist";
+    const plistPath = "/Library/LaunchDaemons/ai.openclaw.gateway.plist";
+    state.files.set(unlabeled, "<plist><dict/></plist>");
+    state.files.set(plistPath, "<plist/>");
+    state.plutilLabels.set(plistPath, "ai.openclaw.gateway");
+
+    await expect(inspectSystemLaunchDaemonOwnership("ai.openclaw.gateway")).resolves.toEqual({
+      status: "installed",
+      serviceTarget: "system/ai.openclaw.gateway",
+      plistPath,
+    });
+  });
+
+  it("ignores a plist whose Label is present but empty", async () => {
+    const emptyLabel = "/Library/LaunchDaemons/com.vendor.empty-label.plist";
+    state.files.set(emptyLabel, "<plist/>");
+    state.plutilLabels.set(emptyLabel, "");
+
+    await expect(inspectSystemLaunchDaemonOwnership("ai.openclaw.gateway")).resolves.toEqual({
+      status: "absent",
+      serviceTarget: "system/ai.openclaw.gateway",
+    });
+  });
+
+  it("still fails closed when a plist cannot be parsed at all", async () => {
+    const corrupt = "/Library/LaunchDaemons/com.vendor.corrupt.plist";
+    state.files.set(corrupt, "not-a-plist");
+    state.plutilErrors.set(corrupt, `${corrupt}: Property List error: Unexpected character b`);
+
+    await expect(inspectSystemLaunchDaemonOwnership("ai.openclaw.gateway")).resolves.toEqual({
+      status: "unverifiable",
+      serviceTarget: "system/ai.openclaw.gateway",
+      operation: "filesystem",
+      detail: `${corrupt}: ${corrupt}: Property List error: Unexpected character b`,
+    });
+  });
+
   it("fails closed on an unreadable noncanonical vendor plist", async () => {
     const unrelated = "/Library/LaunchDaemons/com.vendor.locked.plist";
     state.files.set(unrelated, "<plist/>");
@@ -249,6 +310,8 @@ describe("system LaunchDaemon ownership", () => {
     expect(script).toContain(
       'if [ "$openclaw_system_launchd_plist_label" != "$openclaw_system_launchd_label" ]',
     );
+    // The detached restart path must skip unlabeled plists like the in-process scan.
+    expect(script).toContain("no value at that key path|invalid key path");
     expect(script).not.toContain("|| true");
   });
 });

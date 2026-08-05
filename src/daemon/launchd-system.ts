@@ -78,6 +78,8 @@ if [ -z "$openclaw_system_launchd_conflict" ]; then
             openclaw_system_launchd_conflict="$openclaw_system_launchd_plist"
             openclaw_system_launchd_detail="installed same-label system LaunchDaemon plist $openclaw_system_launchd_plist"
             break
+          elif printf '%s' "$openclaw_system_launchd_plist_label" | /usr/bin/grep -Eiq 'no value at that key path|invalid key path'; then
+            continue
           else
             openclaw_system_launchd_conflict="$openclaw_system_launchd_plist"
             openclaw_system_launchd_detail="could not inspect system LaunchDaemon plist $openclaw_system_launchd_plist: $openclaw_system_launchd_plist_label"
@@ -112,7 +114,13 @@ fi
 type LaunchDaemonPlistLabelResult =
   | { status: "ok"; label: string }
   | { status: "missing" }
+  | { status: "unlabeled" }
   | { status: "unverifiable"; detail: string };
+
+// plutil reports a readable plist that carries no top-level Label with this
+// error. Such a job can never own our label — launchd refuses to load a daemon
+// without one — so it must not mask the rest of the directory scan.
+const PLUTIL_ABSENT_KEY_PATTERN = /no value at that key path|invalid key path/i;
 
 /** Reads the top-level Label through the native parser for XML and binary plists. */
 export async function readLaunchDaemonPlistLabel(
@@ -128,8 +136,9 @@ export async function readLaunchDaemonPlistLabel(
     plistPath,
   ]);
   const label = extracted.stdout.trim();
-  if (extracted.code === 0 && label) {
-    return { status: "ok", label };
+  if (extracted.code === 0) {
+    // An empty Label is still a parsed plist that cannot match our label.
+    return label ? { status: "ok", label } : { status: "unlabeled" };
   }
   try {
     await fs.access(plistPath);
@@ -139,9 +148,14 @@ export async function readLaunchDaemonPlistLabel(
     }
     return { status: "unverifiable", detail: formatUnknownError(error) };
   }
+  const detail = formatLaunchctlResultDetail(extracted);
+  // Only a genuine read/parse failure is unverifiable; an absent key is a fact.
+  if (PLUTIL_ABSENT_KEY_PATTERN.test(detail)) {
+    return { status: "unlabeled" };
+  }
   return {
     status: "unverifiable",
-    detail: formatLaunchctlResultDetail(extracted) || "plutil did not return a Label",
+    detail: detail || "plutil did not return a Label",
   };
 }
 
