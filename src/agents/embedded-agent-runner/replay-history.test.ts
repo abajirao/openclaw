@@ -22,7 +22,7 @@ const COPIED_INBOUND_METADATA_ONLY_TEXT = [
 function bedrockAssistant(
   content: unknown,
   stopReason: "error" | "stop" | "toolUse" | "length" = "error",
-  usageOverrides: Record<string, number> = {},
+  usageOverrides: Record<string, unknown> = {},
 ): AgentMessage {
   // Bedrock fixtures cover providers that can return empty or legacy-shaped
   // assistant content during streamed turns.
@@ -177,8 +177,23 @@ describe("normalizeAssistantReplayContent", () => {
     expect(out[1]).toBe(silentStop);
   });
 
+  it("preserves empty stop turns with nonzero or unknown usage", () => {
+    const reasoningStop = bedrockAssistant([], "stop", { reasoningTokens: 1 });
+    const unknownUsageStop = {
+      ...bedrockAssistant([], "stop"),
+      usage: { contextUsage: { state: "unavailable" } },
+    } as unknown as AgentMessage;
+    const messages = [userMessage("hello"), reasoningStop, unknownUsageStop];
+    const out = normalizeAssistantReplayContent(messages);
+    expect(out).toBe(messages);
+    expect(out[1]).toBe(reasoningStop);
+    expect(out[2]).toBe(unknownUsageStop);
+  });
+
   it("converts mid-turn zero-usage empty stop turns to a replay sentinel", () => {
-    const falseSuccessStop = bedrockAssistant([], "stop");
+    const falseSuccessStop = bedrockAssistant([], "stop", {
+      contextUsage: { state: "unavailable" },
+    });
     const messages = [userMessage("hello"), falseSuccessStop, userMessage("retry")];
     const out = normalizeAssistantReplayContent(messages);
     expect(out).not.toBe(messages);

@@ -1,7 +1,7 @@
 /**
  * Detects provider stop turns that contain no assistant-visible content.
  */
-import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
+import { hasNonzeroUsage, normalizeUsage, type UsageLike } from "../usage.js";
 
 type EmptyAssistantTurnLike = {
   content?: unknown;
@@ -9,46 +9,22 @@ type EmptyAssistantTurnLike = {
   usage?: unknown;
 };
 
-type UsageFieldMap = {
-  input?: unknown;
-  output?: unknown;
-  cacheRead?: unknown;
-  cacheWrite?: unknown;
-  total?: unknown;
-  totalTokens?: unknown;
-  total_tokens?: unknown;
-};
-
 // Upstream agent runtimes should normalize Anthropic zero-token empty `stop`
 // turns before OpenClaw sees them. Downstream: openclaw/openclaw#71880.
-function readFiniteTokenCount(value: unknown): number | undefined {
-  return asFiniteNumber(value);
-}
-
-function isZero(value: number | undefined): value is 0 {
-  return value === 0;
-}
-
 function hasZeroTokenUsageSnapshot(usage: unknown): boolean {
-  if (!usage || typeof usage !== "object") {
+  const normalized = normalizeUsage(usage as UsageLike | null | undefined);
+  if (!normalized) {
     return false;
   }
-  const typed = usage as UsageFieldMap;
-  const input = readFiniteTokenCount(typed.input);
-  const output = readFiniteTokenCount(typed.output);
-  const cacheRead = readFiniteTokenCount(typed.cacheRead);
-  const cacheWrite = readFiniteTokenCount(typed.cacheWrite);
-  const total = readFiniteTokenCount(typed.total ?? typed.totalTokens ?? typed.total_tokens);
-  if (total !== undefined) {
-    return (
-      total === 0 &&
-      [input, output, cacheRead, cacheWrite].every((value) => value === undefined || value === 0)
-    );
-  }
-  const components = [input, output, cacheRead, cacheWrite].filter(
-    (value): value is number => value !== undefined,
-  );
-  return components.length > 0 && components.every(isZero);
+  // Anthropic can report unavailable context telemetry alongside explicit zero buckets.
+  const tokenUsage =
+    normalized.contextUsage?.state === "unavailable"
+      ? { ...normalized, contextUsage: undefined }
+      : normalized;
+  const hasObservedTokenBucket =
+    Object.values(tokenUsage).some((value) => typeof value === "number") ||
+    tokenUsage.contextUsage?.state === "available";
+  return hasObservedTokenBucket && !hasNonzeroUsage(tokenUsage);
 }
 
 export function isZeroUsageEmptyStopAssistantTurn(message: EmptyAssistantTurnLike | null): boolean {

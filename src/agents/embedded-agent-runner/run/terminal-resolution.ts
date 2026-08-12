@@ -7,6 +7,7 @@ import { projectAgentRunAttemptTerminal } from "../../agent-run-terminal-outcome
 import type { AuthProfileFailureReason, AuthProfileStore } from "../../auth-profiles.js";
 import type { AgentExecutionAuthBinding } from "../../execution-auth-binding.js";
 import type { ResolvedProviderAuth } from "../../model-auth.js";
+import { isZeroUsageEmptyStopAssistantTurn } from "../empty-assistant-turn.js";
 import { log } from "../logger.js";
 import type { EmbeddedRunReplayState } from "../replay-state.js";
 import type {
@@ -53,6 +54,8 @@ const COMPACTION_CONTINUATION_RETRY_INSTRUCTION =
   "The previous attempt compacted the conversation context before producing a final user-visible answer. Continue from the compacted transcript and produce the final answer now. Do not restart from scratch, do not repeat completed work, and do not rerun tools unless the transcript clearly lacks required evidence.";
 const BEFORE_AGENT_FINALIZE_RETRY_PROMPT_PREFIX =
   "Before accepting the previous final answer, apply this revision request and produce the revised final answer. Do not repeat completed work or rerun tools unless the request explicitly requires it.";
+const ZERO_USAGE_EMPTY_STOP_DIAGNOSTIC =
+  "⚠️ Provider returned an empty response after retrying. Check the provider configuration, credentials, model id, and network path.";
 
 type TerminalRunParams = RunEmbeddedAgentParams & {
   authProfileStateMode?: "read-write" | "read-only";
@@ -314,8 +317,13 @@ export async function resolveEmbeddedRunTerminal(input: {
     );
     return { action: "retry" };
   }
+  const emptyResponseRetriesExhausted = Boolean(
+    !nextReasoningOnlyRetryInstruction &&
+    nextEmptyResponseRetryInstruction &&
+    retryState.emptyResponseAttempts >= input.maxEmptyResponseRetryAttempts,
+  );
   const completedEmptyFinalization = input.settledTurnFinalizationOutcome === "completed-empty";
-  const incompleteTurnText =
+  const resolvedIncompleteTurnText =
     emptyAssistantReplyIsSilent ||
     (completedEmptyFinalization && !requiresVisibleTerminalReply(runParams))
       ? null
@@ -327,6 +335,14 @@ export async function resolveEmbeddedRunTerminal(input: {
           hadPotentialSideEffects: input.replayState.hadPotentialSideEffects,
           attempt,
         });
+  const terminalAssistant = attempt.currentAttemptAssistant ?? attempt.lastAssistant ?? null;
+  const incompleteTurnText =
+    emptyResponseRetriesExhausted &&
+    resolvedIncompleteTurnText &&
+    !terminalAssistant?.providerReplay &&
+    isZeroUsageEmptyStopAssistantTurn(terminalAssistant)
+      ? ZERO_USAGE_EMPTY_STOP_DIAGNOSTIC
+      : resolvedIncompleteTurnText;
   const incompleteTurnFallbackSafe = Boolean(
     incompleteTurnText &&
     !terminalInterrupted &&
@@ -378,11 +394,7 @@ export async function resolveEmbeddedRunTerminal(input: {
       terminalToolPresentation,
     });
   }
-  if (
-    !nextReasoningOnlyRetryInstruction &&
-    nextEmptyResponseRetryInstruction &&
-    retryState.emptyResponseAttempts >= input.maxEmptyResponseRetryAttempts
-  ) {
+  if (emptyResponseRetriesExhausted) {
     log.warn(
       `empty response retries exhausted: runId=${runParams.runId} sessionId=${runParams.sessionId} ` +
         `provider=${input.activeErrorContext.provider}/${input.activeErrorContext.model} attempts=${retryState.emptyResponseAttempts}/${input.maxEmptyResponseRetryAttempts} — surfacing incomplete-turn error`,

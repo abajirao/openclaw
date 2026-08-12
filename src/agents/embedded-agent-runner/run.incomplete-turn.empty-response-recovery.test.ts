@@ -35,6 +35,7 @@ describe("runEmbeddedAgent incomplete-turn safety", () => {
             cacheRead: 0,
             cacheWrite: 0,
             totalTokens: 0,
+            contextUsage: { state: "unavailable" },
           },
         }),
       }),
@@ -176,6 +177,36 @@ describe("runEmbeddedAgent incomplete-turn safety", () => {
     expectWarnMessageWith("compaction interrupted visible final answer");
   });
 
+  it("keeps compaction replay out of the exhausted empty-stop diagnostic", async () => {
+    const checkpoint = makeLastAssistant({
+      stopReason: "stop",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+      providerReplay: {
+        v: 1,
+        type: "openai-responses-compaction",
+        data: "opaque-checkpoint",
+        provider: "openai",
+        api: "openai-responses",
+        model: "gpt-5.6-luna",
+      },
+    });
+    mockedRunEmbeddedAttempt.mockResolvedValue(
+      makeAttemptResult({
+        assistantTexts: [],
+        currentAttemptAssistant: checkpoint,
+        lastAssistant: checkpoint,
+      }),
+    );
+    const result = await runEmbeddedAgent(makeRunParams("run-empty-compaction-replay"));
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(3);
+    expect(runAttemptCall(1).prompt).toContain(EMPTY_RESPONSE_RETRY_INSTRUCTION);
+    expectWarnMessageWith("compaction interrupted visible final answer");
+    expect(result.payloads?.[0]).toEqual({
+      text: "⚠️ Agent couldn't generate a response. Please try again.",
+      isError: true,
+    });
+  });
+
   it("retries empty Anthropic-compatible stop turns even when the provider is not Kimi", async () => {
     mockedClassifyFailoverReason.mockReturnValue(null);
     mockedResolveModelAsync.mockResolvedValue({
@@ -240,15 +271,23 @@ describe("runEmbeddedAgent incomplete-turn safety", () => {
     expectWarnMessageWith("empty response detected");
   });
 
-  it("surfaces an error after exhausting empty-response retries", async () => {
+  it("diagnoses zero-usage empty stops after exhausting the retry", async () => {
     mockedClassifyFailoverReason.mockReturnValue(null);
     mockedRunEmbeddedAttempt.mockResolvedValue(
       makeAttemptResult({
         assistantTexts: [],
         lastAssistant: makeLastAssistant({
-          stopReason: "end_turn",
+          stopReason: "stop",
           model: "gpt-5.4",
-          content: [{ type: "text", text: "" }],
+          content: [],
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            contextUsage: { state: "unavailable" },
+          },
         }),
       }),
     );
@@ -258,9 +297,59 @@ describe("runEmbeddedAgent incomplete-turn safety", () => {
     );
 
     expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
-    expect(result.payloads?.[0]?.isError).toBe(true);
-    expect(result.payloads?.[0]?.text).toContain("Please try again");
+    expect(runAttemptCall(1).prompt).toContain(EMPTY_RESPONSE_RETRY_INSTRUCTION);
+    expect(result.payloads).toEqual([
+      {
+        text:
+          "⚠️ Provider returned an empty response after retrying. " +
+          "Check the provider configuration, credentials, model id, and network path.",
+        isError: true,
+      },
+    ]);
+    expect(result.meta.replayInvalid).toBe(true);
+    expect(result.meta.livenessState).toBe("abandoned");
     expectWarnMessageWith("empty response retries exhausted");
+  });
+
+  it("keeps the generic incomplete-turn diagnostic for nonzero or unknown usage", async () => {
+    const cases = [
+      {
+        runId: "run-empty-reasoning-usage-exhausted",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoningTokens: 1,
+        },
+      },
+      {
+        runId: "run-empty-unknown-usage-exhausted",
+        usage: { contextUsage: { state: "unavailable" as const } },
+      },
+    ];
+    for (const testCase of cases) {
+      resetRunIncompleteTurnOwnerMocks();
+      mockedClassifyFailoverReason.mockReturnValue(null);
+      mockedRunEmbeddedAttempt.mockResolvedValue(
+        makeAttemptResult({
+          assistantTexts: [],
+          lastAssistant: makeLastAssistant({
+            stopReason: "stop",
+            content: [],
+            usage: testCase.usage,
+          }),
+        }),
+      );
+
+      const result = await runEmbeddedAgent(makeRunParams(testCase.runId));
+
+      expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+      expect(runAttemptCall(1).prompt).toContain(EMPTY_RESPONSE_RETRY_INSTRUCTION);
+      expect(result.payloads).toEqual([
+        { text: "⚠️ Agent couldn't generate a response. Please try again.", isError: true },
+      ]);
+    }
   });
 
   it("surfaces an error after exhausting reasoning-only retries without a visible answer", async () => {
