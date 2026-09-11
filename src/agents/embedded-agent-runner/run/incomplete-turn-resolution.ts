@@ -16,6 +16,7 @@ import { renderAuthProfileFailoverCopy } from "../../failover/user-copy.js";
 import { buildProviderAuthRecoveryHint } from "../../provider-auth-recovery-hint.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { hasCommittedMessagingToolDeliveryEvidence } from "../delivery-evidence.js";
+import { isZeroUsageEmptyStopAssistantTurn } from "../empty-assistant-turn.js";
 import type { EmbeddedRunLivenessState } from "../types.js";
 import {
   hasAsyncActivity,
@@ -127,7 +128,21 @@ export function resolveIncompleteTurnPayloadText(params: {
     return null;
   }
 
-  if (params.hadPotentialSideEffects || params.attempt.replayMetadata.hadPotentialSideEffects) {
+  const hadPotentialSideEffects = Boolean(
+    params.hadPotentialSideEffects || params.attempt.replayMetadata.hadPotentialSideEffects,
+  );
+
+  // A normally-terminating stream that produced no content and zero billed
+  // tokens is almost always a provider misconfiguration (wrong baseUrl, bad
+  // key, unknown model) rather than a model that chose to say nothing. Surface
+  // which provider to inspect instead of the generic "try again", which leaves
+  // the operator with no next step. Detection stays owned by
+  // isZeroUsageEmptyStopAssistantTurn so the zero-usage contract has one owner.
+  if (assistantState.emptyResponse && isZeroUsageEmptyStopAssistantTurn(assistant ?? null)) {
+    return buildConfigErrorDiagnosticText({ assistant, hadPotentialSideEffects });
+  }
+
+  if (hadPotentialSideEffects) {
     return "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying.";
   }
   if (assistant && isProviderRefusalAssistantError(assistant)) {
@@ -149,6 +164,58 @@ export function resolveIncompleteTurnPayloadText(params: {
     });
   }
   return "⚠️ Agent couldn't generate a response. Please try again.";
+}
+
+/**
+ * Builds the operator-facing diagnostic for an empty, zero-usage provider
+ * stream. Names the provider/model when known so the failing surface is
+ * identifiable without log spelunking.
+ */
+function buildConfigErrorDiagnosticText(params: {
+  assistant: { provider?: string; model?: string } | undefined;
+  hadPotentialSideEffects: boolean;
+}): string {
+  const provider = normalizeOptionalIdentifier(params.assistant?.provider);
+  const modelId = normalizeOptionalIdentifier(params.assistant?.model);
+  const providerLine = provider ? `  Provider: ${provider}\n` : "";
+  const modelLine = modelId ? `  Model:    ${modelId}\n` : "";
+  // Without this guard an absent provider AND model collapse into two
+  // consecutive blank lines, which reads as a formatting bug.
+  const identityBlock = providerLine || modelLine ? `\n${providerLine}${modelLine}` : "";
+  // The OpenRouter URL example only helps when that provider was in play (its
+  // /v1 path silently serves HTML; /api/v1 is required). Unknown provider still
+  // gets the hint, since OpenRouter is the most common cause in practice.
+  const isOpenRouterProvider = !provider || provider.toLowerCase().includes("openrouter");
+  const baseUrlHint = isOpenRouterProvider
+    ? "\n     (OpenRouter uses https://openrouter.ai/api/v1, not /v1)"
+    : "";
+  const sideEffectsNote = params.hadPotentialSideEffects
+    ? "\n⚠️ Some tool actions may have already been executed — please verify before retrying."
+    : "";
+  return (
+    "⚠️ Provider returned an empty stream (0 content, 0 tokens).\n" +
+    "This usually indicates a configuration error, not a model issue.\n" +
+    identityBlock +
+    "\n" +
+    "Common causes:\n" +
+    "  1. Wrong baseUrl — check agents/<id>/agent/models.json" +
+    baseUrlHint +
+    "\n" +
+    "  2. Invalid or expired API key for the provider\n" +
+    "  3. Model id not recognized by the selected provider\n" +
+    "  4. Network path returning HTML (e.g., captive portal, proxy)\n" +
+    "\n" +
+    "Run `openclaw doctor` to inspect provider configuration." +
+    sideEffectsNote
+  );
+}
+
+function normalizeOptionalIdentifier(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 /**

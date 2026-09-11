@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { makeUserMessage } from "../../../test/helpers/user-message.js";
 import {
   buildEmbeddedRunnerAssistant,
+  createMockUsage,
   makeEmbeddedRunnerAttempt,
 } from "../test-helpers/embedded-agent-runner-e2e-fixtures.js";
 import {
@@ -281,5 +282,79 @@ describe("incomplete-turn payload resolution", () => {
     );
 
     expect(incompleteTurnText).toBeNull();
+  });
+
+  // A zero-usage empty "stop" is a provider misconfiguration signal, not a model
+  // that chose silence; the operator needs the failing provider named.
+  describe("empty zero-usage provider stream", () => {
+    it("names the provider and model instead of the generic retry text", () => {
+      const text = resolveIncompleteTurnPayloadText(
+        makeIncompleteTurnParams({
+          assistantTexts: [],
+          lastAssistant: makeLastAssistant({
+            provider: "openrouter",
+            model: "deepseek/deepseek-v4-flash",
+            content: [],
+            stopReason: "stop",
+          }),
+        }),
+      );
+
+      expect(text).toContain("Provider returned an empty stream");
+      expect(text).toContain("openrouter");
+      expect(text).toContain("deepseek/deepseek-v4-flash");
+      expect(text).toContain("openrouter.ai/api/v1");
+      expect(text).not.toContain("Please try again.");
+    });
+
+    it("appends the side-effects warning when tools may have run", () => {
+      const text = resolveIncompleteTurnPayloadText(
+        makeIncompleteTurnParams(
+          {
+            assistantTexts: [],
+            lastAssistant: makeLastAssistant({ content: [], stopReason: "stop" }),
+          },
+          { hadPotentialSideEffects: true },
+        ),
+      );
+
+      expect(text).toContain("Provider returned an empty stream");
+      expect(text).toContain("may have already been executed");
+    });
+
+    it("omits the OpenRouter base-url hint for an unrelated provider", () => {
+      const text = resolveIncompleteTurnPayloadText(
+        makeIncompleteTurnParams({
+          assistantTexts: [],
+          lastAssistant: makeLastAssistant({
+            provider: "anthropic",
+            model: "sonnet-4.6",
+            content: [],
+            stopReason: "stop",
+          }),
+        }),
+      );
+
+      expect(text).toContain("Provider returned an empty stream");
+      expect(text).not.toContain("openrouter.ai/api/v1");
+    });
+
+    // Real billed tokens mean the model ran and legitimately said nothing, so the
+    // config-error diagnostic must not claim a misconfiguration.
+    it("defers to the generic retry text when the model actually billed tokens", () => {
+      const text = resolveIncompleteTurnPayloadText(
+        makeIncompleteTurnParams({
+          assistantTexts: [],
+          lastAssistant: makeLastAssistant({
+            content: [],
+            stopReason: "stop",
+            usage: createMockUsage(120, 0),
+          }),
+        }),
+      );
+
+      expect(text).toContain("couldn't generate a response");
+      expect(text).not.toContain("Provider returned an empty stream");
+    });
   });
 });
